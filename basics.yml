@@ -1,0 +1,60 @@
+---
+- hosts: all
+  become: false
+  vars:
+    icinga_master: eple.tg16.gathering.org
+  tasks:
+  - name: APT repos
+    apt_repository: repo={{ item }} state=present
+    with_items:
+        - deb http://http.debian.net/debian jessie-backports main
+        - deb http://http.debian.net/debian jessie main non-free contrib
+  - name: Backport packages 
+    apt: name={{ item }} default_release=jessie-backports
+    with_items:
+    - icinga2
+
+  - name: Basics
+    apt: name={{ item }} state=present
+    with_items:
+    - vim
+    - git
+    - tmux
+    - screen
+    - mosh
+    - libwww-perl
+    - ntp
+
+  - name: Check icinga2-presence
+    shell: (hostname -f; icinga2 node list ) | grep -q {{ inventory_hostname }}
+    delegate_to: "{{ icinga_master }}"
+    ignore_errors: true
+    register: hasicinga
+
+  - name: Get icinga2 ticket
+    command: icinga2 pki ticket --cn {{ inventory_hostname }}
+    delegate_to: "{{ icinga_master }}"
+    register: ticket
+    when: hasicinga|failed
+
+  - name: Permissions are hard
+    command: chown nagios:nagios /etc/icinga2/pki
+    when: hasicinga|failed
+
+  - name: Get icinga2 ca from master
+    command: icinga2 pki save-cert --host {{ icinga_master }} --port 5665 --key local.key --cert local.crt --trustedcert /etc/icinga2/pki/ca.crt
+    when: hasicinga|failed
+
+  - name: Register icinga2
+    command: icinga2 node setup --zone {{ inventory_hostname }} --master_host {{ icinga_master }} --accept-config --accept-commands --ticket {{ ticket.stdout }} --endpoint {{ icinga_master }},{{ icinga_master }},5665 --trustedcert /etc/icinga2/pki/ca.crt
+    when: hasicinga|failed
+
+  - name: Deploy zone-config
+    copy: src=files/icinga.conf dest=/etc/icinga2/icinga2.conf
+    when: inventory_hostname != icinga_master
+    register: conf
+
+  - name: Restart icinga2 daemon
+    command: systemctl restart icinga2
+    when: (hasicinga|failed) or (conf|changed)
+
